@@ -20,6 +20,15 @@ class RateController extends Controller
         $response = $this->augmont->getRates();
 
         if (!$response['success']) {
+            // Try returning cached rates if Augmont is down
+            $cached = Cache::get('last_gold_rates');
+            if ($cached) {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Cached rates (Augmont temporarily unavailable)',
+                    'data'    => ['rates' => $cached, 'source' => 'cache'],
+                ]);
+            }
             return response()->json(['success' => false, 'message' => $response['message'] ?? 'Failed to fetch rates'], 503);
         }
 
@@ -46,6 +55,9 @@ class RateController extends Controller
             // Fallback: return raw data if structure unexpected
             $normalized = $raw;
         }
+
+        // Cache normalized rates for 10 minutes as fallback
+        Cache::put('last_gold_rates', $normalized, now()->addMinutes(10));
 
         return response()->json([
             'success' => true,

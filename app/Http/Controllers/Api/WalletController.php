@@ -46,6 +46,7 @@ class WalletController extends Controller
     // =========================================================
     // POST /api/wallet/add-money
     // Creates a Cashfree order → frontend opens checkout
+    // In sandbox mode: directly credits wallet for testing
     // =========================================================
     public function addMoney(Request $request)
     {
@@ -67,6 +68,47 @@ class WalletController extends Controller
             $wallet = $user->getOrCreateWallet();
             $amount = round((float) $request->amount, 2);
             $orderId = 'wallet_' . time() . '_' . rand(10000, 99999);
+
+            // Sandbox mode: directly credit wallet without Cashfree
+            $isSandbox = str_contains($this->cashfreeConfig['api_url'] ?? '', 'sandbox');
+            if ($isSandbox) {
+                Log::info('Wallet add money - SANDBOX MODE: directly crediting wallet', [
+                    'user_id' => $user->id, 'amount' => $amount,
+                ]);
+
+                $balanceBefore = $wallet->balance;
+
+                DB::transaction(function () use ($wallet, $user, $amount, $orderId, $balanceBefore) {
+                    $wallet->credit($amount);
+
+                    WalletTransaction::create([
+                        'user_id'        => $user->id,
+                        'wallet_id'      => $wallet->id,
+                        'type'           => 'credit',
+                        'category'       => 'add_money',
+                        'amount'         => $amount,
+                        'balance_before' => $balanceBefore,
+                        'balance_after'  => $wallet->balance,
+                        'reference_id'   => $orderId,
+                        'payment_method' => 'sandbox',
+                        'status'         => 'completed',
+                        'description'    => 'Wallet top-up (Sandbox - direct credit)',
+                        'meta'           => ['sandbox' => true],
+                    ]);
+                });
+
+                return response()->json([
+                    'success' => true,
+                    'message' => "₹{$amount} added to wallet successfully (Sandbox)",
+                    'data'    => [
+                        'order_id'     => $orderId,
+                        'order_amount' => $amount,
+                        'balance'      => number_format($wallet->fresh()->balance, 2, '.', ''),
+                        'sandbox_mode' => true,
+                    ],
+                    'timestamp' => now(),
+                ]);
+            }
 
             // Create Cashfree payment order
             $orderData = [
