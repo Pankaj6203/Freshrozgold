@@ -23,6 +23,7 @@ class SellGoldRequest extends FormRequest
             'blockId'               => 'nullable|string',
             'uniqueId'              => 'nullable|string',
             'userBank'              => 'nullable|array',
+            'userBankId'            => 'nullable|integer',
         ];
     }
 

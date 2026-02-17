@@ -56,17 +56,15 @@ class KycController extends Controller
 
             if ($existingPan) {
                 return response()->json([
-                    'success' => true,
-                    'message' => 'PAN already verified',
+                    'success' => false,
+                    'message' => 'PAN number already verified. Cannot verify the same PAN again.',
                     'data' => [
                         'pan_number' => $panNumber,
-                        'name' => $existingPan->name,
-                        'status' => $existingPan->status,
-                        'verified_at' => $existingPan->verified_at,
-                        'already_verified' => true
+                        'already_verified' => true,
+                        'verified_at' => $existingPan->verified_at
                     ],
                     'timestamp' => now()
-                ], 200);
+                ], 400);
             }
 
             // Call PAN Verification API
@@ -83,6 +81,17 @@ class KycController extends Controller
             // Store PAN verification data
             $verificationId = 'PAN_' . time() . '_' . rand(1000, 9999);
             
+            // Map API category 'person' to db enum 'individual'
+            $apiCategory = strtolower($apiResult['data']['category'] ?? '');
+            $dbCategory = 'other'; // default
+            if ($apiCategory === 'person' || $apiCategory === 'individual') {
+                $dbCategory = 'individual';
+            } elseif (in_array($apiCategory, ['company', 'firm', 'trust'])) {
+                $dbCategory = $apiCategory;
+            } elseif (empty($apiCategory)) {
+                $dbCategory = null; 
+            }
+
             $insert = [
                 'pan_number' => $panNumber,
                 'name' => $apiResult['data']['name'] ?? null,
@@ -90,7 +99,7 @@ class KycController extends Controller
                 'father_name' => $apiResult['data']['father_name'] ?? null,
                 'date_of_birth' => $apiResult['data']['date_of_birth'] ?? null,
                 'status' => $apiResult['data']['status'] ?? 'valid',
-                'category' => $apiResult['data']['category'] ?? null,
+                'category' => $dbCategory,
                 'is_verified' => true,
                 'verification_id' => $verificationId,
                 'masked_image_url' => $apiResult['data']['masked_image'] ?? null,
@@ -109,6 +118,9 @@ class KycController extends Controller
 
             Log::info("PAN Verified Successfully - PAN: $panNumber, Mobile: $mobile");
 
+            // Update User KYC Status
+            $this->_updateUserKycStatus($mobile);
+
             return response()->json([
                 'success' => true,
                 'message' => 'PAN verified successfully',
@@ -117,6 +129,7 @@ class KycController extends Controller
                     'pan_number' => $panNumber,
                     'name' => $apiResult['data']['name'],
                     'name_on_card' => $apiResult['data']['name_on_card'] ?? null,
+                    'date_of_birth' => $apiResult['data']['date_of_birth'] ?? null,
                     'status' => $apiResult['data']['status'],
                     'category' => $apiResult['data']['category'] ?? 'individual',
                     'verified_at' => now()
@@ -160,14 +173,74 @@ class KycController extends Controller
             // Mobile is not required or searched for Aadhaar OTP generation
             $mobile = $request->input('mobile', null);
 
+            // Check if Aadhaar already verified
+            $existingAadhaar = AadhaarVerification::where('aadhaar_number', $aadhaarNumber)
+                ->verified()
+                ->first();
+
+            if ($existingAadhaar) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Aadhaar number already verified. Cannot generate OTP for already verified Aadhaar.',
+                    'data' => [
+                        'aadhaar_number' => 'XXXX XXXX ' . substr($aadhaarNumber, -4),
+                        'already_verified' => true,
+                        'verified_at' => $existingAadhaar->verified_at
+                    ],
+                    'timestamp' => now()
+                ], 400);
+            }
+
             // Call Aadhaar OTP Generation API (we pass only aadhaar_number to provider)
             $apiResult = $this->callAadhaarOtpAPI($aadhaarNumber);
 
             if (!$apiResult['success']) {
+                // Log full details for server-side debugging
+                Log::error("Aadhaar OTP API failed", [
+                    'aadhaar_last4' => substr($aadhaarNumber, -4),
+                    'error' => $apiResult['error'] ?? 'Unknown',
+                    'http_code' => $apiResult['http_code'] ?? null,
+                    'raw_response' => $apiResult['raw_response'] ?? null,
+                    'environment' => $this->quickekycConfig['environment'] ?? 'unknown',
+                    'api_url' => ($this->quickekycConfig['environment'] === 'sandbox')
+                        ? $this->quickekycConfig['sandbox_url'] 
+                        : $this->quickekycConfig['api_url'],
+                ]);
+
+                // Robust provider status extraction: prefer explicit http_code, fallback to provider's raw_response.status_code
+                $providerCode = null;
+                if (isset($apiResult['http_code'])) {
+                    $providerCode = intval($apiResult['http_code']);
+                } elseif (!empty($apiResult['raw_response']['status_code'])) {
+                    $providerCode = intval($apiResult['raw_response']['status_code']);
+                } elseif (!empty($apiResult['raw_response']['http_code'])) {
+                    $providerCode = intval($apiResult['raw_response']['http_code']);
+                }
+
+                // Provider rejected credentials → surface as upstream problem (Bad Gateway)
+                if ($providerCode === 401) {
+                    Log::warning("Aadhaar OTP generation unauthorized (QuickeKYC) for Aadhaar: ****" . substr($aadhaarNumber, -4));
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Aadhaar service unauthorized. Check KYC provider API key/configuration.',
+                        'errors'  => null
+                    ], 502);
+                }
+
+                // Provider service error → Service Unavailable
+                if ($providerCode !== null && $providerCode >= 500) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Aadhaar service temporarily unavailable. Please try again later.',
+                        'errors'  => null
+                    ], 503);
+                }
+
+                // Fallback: keep as bad request when provider returned a client-side error we can surface
                 return response()->json([
                     'success' => false,
                     'message' => 'Failed to generate Aadhaar OTP: ' . ($apiResult['error'] ?? 'Unknown error'),
-                    'timestamp' => now()
+                    'errors'  => null
                 ], 400);
             }
 
@@ -189,19 +262,28 @@ class KycController extends Controller
                 $insert['mobile'] = $mobile;
             }
 
-            AadhaarVerification::create($insert);
+            // Check if a pending verification request already exists for this Aadhaar number
+            // If so, update it instead of creating a new row, to avoid unique constraint violation
+            $pendingRecord = AadhaarVerification::where('aadhaar_number', $aadhaarNumber)
+                ->where('is_verified', false)
 
-            Log::info("Aadhaar OTP Generated - Aadhaar: $aadhaarNumber, RequestID: $formattedRequestId");
+                ->first();
+
+            if ($pendingRecord) {
+                $pendingRecord->update(array_merge($insert, ['updated_at' => now()]));
+                Log::info("Existing pending Aadhaar record updated - Aadhaar: $aadhaarNumber, RequestID: $formattedRequestId");
+            } else {
+                AadhaarVerification::create($insert);
+                Log::info("New Aadhaar record created - Aadhaar: $aadhaarNumber, RequestID: $formattedRequestId");
+            }
 
             return response()->json([
                 'success' => true,
                 'message' => 'OTP sent to Aadhaar registered mobile number',
                 'data' => [
-                    'request_id' => $formattedRequestId,  // String format
-                    'aadhaar_number' => 'XXXX XXXX ' . substr($aadhaarNumber, -4),
-                    'message' => 'OTP sent to registered mobile number'
-                ],
-                'timestamp' => now()
+                    'request_id' => $formattedRequestId,
+                    'aadhaar_number' => 'XXXX XXXX ' . substr($aadhaarNumber, -4)
+                ]
             ], 200);
 
         } catch (\Exception $e) {
@@ -251,11 +333,67 @@ class KycController extends Controller
             Log::info("Pending Verification Found: " . ($pendingVerification ? 'Yes (ID: ' . $pendingVerification->id . ')' : 'No'));
 
             if (!$pendingVerification) {
+                // IDEMPOTENCY CHECK:
+                // Check if this request_id was ALREADY verified (in case frontend is retrying after a timeout/error)
+                $alreadyVerified = AadhaarVerification::where('request_id', $requestId)
+                    ->where('is_verified', true)
+                    ->first();
+
+                if ($alreadyVerified) {
+                    Log::info("Duplicate Aadhaar OTP verification request for Verified ID: {$alreadyVerified->id}. Returning previous success.");
+                    
+                    // Trigger status update just in case it failed previously
+                    $this->_updateUserKycStatus($alreadyVerified->mobile);
+
+                    return response()->json([
+                        'success' => true,
+                        'message' => 'Aadhaar already verified',
+                        'data' => [
+                            'verification_id' => $alreadyVerified->verification_id,
+                            'name' => $alreadyVerified->name,
+                            'father_name' => $alreadyVerified->father_name,
+                            'date_of_birth' => $alreadyVerified->date_of_birth,
+                            'gender' => $alreadyVerified->gender,
+                            'mobile' => $alreadyVerified->mobile,
+                            'address' => $alreadyVerified->address,
+                            'city' => $alreadyVerified->city,
+                            'state' => $alreadyVerified->state,
+                            'pincode' => $alreadyVerified->pincode,
+                            'masked_aadhaar_number' => 'XXXX XXXX ' . substr($alreadyVerified->aadhaar_number, -4),
+                            'masked_image' => $alreadyVerified->masked_aadhaar_image,
+                            'profile_image' => $alreadyVerified->profile_image,
+                            'verified_at' => $alreadyVerified->verified_at
+                        ],
+                        'timestamp' => now()
+                    ], 200);
+                }
+
                 return response()->json([
                     'success' => false,
                     'message' => 'Invalid or expired request ID',
                     'timestamp' => now()
                 ], 400);
+            }
+            
+            // Ensure mobile number is not null in the pending record before update
+            // If it's null, try to fetch it from the authenticated user or request
+            if (empty($pendingVerification->mobile)) {
+                $user = $request->user();
+                $mobile = $request->input('mobile', $user ? $user->mobile : null);
+                
+                if ($mobile) {
+                    $pendingVerification->mobile = $mobile;
+                    $pendingVerification->save(); // Save immediately so UPDATE query below doesn't fail
+                    Log::info("Fixed missing mobile for pending Aadhaar verification ID: {$pendingVerification->id}");
+                } else {
+                    // Fallback to a dummy mobile if absolutely necessary to prevent crash, 
+                    // though this should be caught by validation earlier.
+                    // But for strict SQL mode, we need a value.
+                    // Let's use the phone from API response if available later, 
+                    // but for THIS specific error, we need to ensure the record has a mobile before update?
+                    // actually the error is on UPDATE `aadhaar_verifications` ... `mobile` = ? 
+                    // where `mobile` is coming from $mobileFromApi which might be null.
+                }
             }
 
             // Call Aadhaar Verification API
@@ -274,6 +412,18 @@ class KycController extends Controller
             
             // Extract mobile from API response if available
             $mobileFromApi = $apiResult['data']['phone'] ?? null;
+            
+            // If phone is missing from API, retain the existing mobile from the DB record
+            // THIS FIXES THE "Column 'mobile' cannot be null" ERROR
+            if (empty($mobileFromApi)) {
+                $mobileFromApi = $pendingVerification->mobile;
+            }
+
+            // If still null (rare edge case), fallback to Auth user mobile
+            if (empty($mobileFromApi)) {
+                $user = $request->user();
+                $mobileFromApi = $user ? $user->mobile : null; 
+            }
             
             AadhaarVerification::where('id', $pendingVerification->id)
                 ->update([
@@ -299,6 +449,9 @@ class KycController extends Controller
                 ]);
 
             Log::info("Aadhaar Verified Successfully - RequestID: $requestId, VerificationID: $verificationId");
+
+            // Update User KYC Status
+            $this->_updateUserKycStatus($mobileFromApi);
 
             return response()->json([
                 'success' => true,
@@ -396,33 +549,43 @@ class KycController extends Controller
             $updateData = [
                 'pan' => $panDetails->pan_number,
                 'aadhaar' => $aadhaarDetails->aadhaar_number,
-                'kyc_status' => 'verified', // We consider local verification sufficient for "verified" status?
-                // Or 'pending' until Augmont approves? Usually 'verified' if we trust QuickeKYC.
-                // Let's set to 'verified' locally.
-                'kyc_verified_at' => now()
+                'kyc_status' => 'verified',
+                'kyc_verified_at' => now(),
             ];
 
+            // If name is missing, use name from documents
+            if (empty($user->name) || str_starts_with($user->name, 'User_')) {
+               $updateData['name'] = $panDetails->name ?? $aadhaarDetails->name;
+            }
+
             // If user doesn't exist, Create or Find?
-            // User likely exists if they logged in.
             $userId = $user ? $user->id : null;
             if (!$userId) {
-                // Try finding by mobile
                 $existingUser = User::where('mobile', $mobile)->first();
                 if ($existingUser) {
-                    $userId = $existingUser->id;
-                    $existingUser->update($updateData);
-                }
-                // If user doesn't exist at all, we can't submit KYC to Augmont without a User ID.
-                else {
-                    return response()->json([
-                        'success' => false,
-                        'message' => 'User not found. Please register first.',
-                        'timestamp' => now()
-                    ], 404);
+                     $existingUser->update($updateData);
                 }
             } else {
                  User::where('id', $userId)->update($updateData);
             }
+
+            // 4. NOTE: Augmont Account is created at Profile Setup step.
+            // We just update the local KYC status here. 
+            // If you need to sync KYC changes to Augmont later (Update Augmont User), 
+            // you can call $this->augmontService->updateUser(...) here.
+            
+            return response()->json([
+                'success' => true,
+                'message' => 'KYC submitted successfully',
+                'data' => [
+                    'kyc_status' => 'verified',
+                    'pan' => $panDetails->pan_number,
+                    'aadhaar' => $aadhaarDetails->aadhaar_number
+                ],
+                'timestamp' => now()
+            ], 200);
+
+        } catch (\Exception $e) {
 
             // Reload user to get unique_id for Augmont
             $userRecord = User::find($userId);
@@ -511,16 +674,68 @@ class KycController extends Controller
             $mobile = $request->mobile;
 
             // Check PAN Status
-            $panVerified = PanVerification::where('mobile', $mobile)
+            $panRecord = PanVerification::where('mobile', $mobile)
                 ->verified()
-                ->exists();
+                ->latest()
+                ->first();
+            
+            $panVerified = $panRecord ? true : false;
 
             // Check Aadhaar Status
-            $aadhaarVerified = AadhaarVerification::where('mobile', $mobile)
+            $aadhaarRecord = AadhaarVerification::where('mobile', $mobile)
                 ->verified()
-                ->exists();
+                ->latest()
+                ->first();
 
-            $status = ($panVerified && $aadhaarVerified) ? 'verified' : (($panVerified || $aadhaarVerified) ? 'partial' : 'pending');
+            $aadhaarVerified = $aadhaarRecord ? true : false;
+
+            $status = ($panVerified && $aadhaarVerified) ? 'verified' : 'pending';
+
+            // Sync with User table if exists
+            // This ensures older records get updated when status is checked
+            $user = User::where('mobile', $mobile)->first();
+            if ($user) {
+                if ($user->kyc_status !== $status) {
+                    $user->kyc_status = $status;
+                    if ($status === 'verified' && !$user->kyc_verified_at) {
+                        $user->kyc_verified_at = now();
+                    }
+                    $user->save();
+                    Log::info("Synced user KYC status for mobile {$mobile} to: {$status} in getKycStatus");
+                }
+            }
+            
+            // Mask Aadhaar Number (Show last 4 digits)
+            $maskedAadhaar = null;
+            if ($aadhaarRecord && !empty($aadhaarRecord->aadhaar_number)) {
+                $rawAadhaar = preg_replace('/[^0-9]/', '', $aadhaarRecord->aadhaar_number);
+                if (strlen($rawAadhaar) >= 4) {
+                    $maskedAadhaar = 'XXXXXXXX' . substr($rawAadhaar, -4);
+                } else {
+                    $maskedAadhaar = 'XXXXXXXX' . $rawAadhaar;
+                }
+            }
+
+            // Split name helper
+            $firstName = '';
+            $lastName = '';
+            
+            $fullName = null;
+            if ($panRecord && $panRecord->name) {
+                $fullName = $panRecord->name;
+            } elseif ($aadhaarRecord && $aadhaarRecord->name) {
+                $fullName = $aadhaarRecord->name;
+            } elseif ($user && $user->name) {
+                $fullName = $user->name;
+            }
+
+            if ($fullName) {
+                $parts = explode(' ', trim($fullName));
+                if (count($parts) > 0) {
+                    $firstName = $parts[0];
+                    $lastName = (count($parts) > 1) ? end($parts) : '';
+                }
+            }
 
             return response()->json([
                 'success' => true,
@@ -529,7 +744,50 @@ class KycController extends Controller
                     'kyc_status' => $status,
                     'pan_verified' => $panVerified,
                     'aadhaar_verified' => $aadhaarVerified,
+                    
+                    // Detailed fields for form pre-fill
+                    'pan_number' => $panRecord ? $panRecord->pan_number : null,
+                    'name_as_per_pan' => $panRecord ? $panRecord->name : null,
+                    'date_of_birth' => $panRecord && $panRecord->date_of_birth
+                        ? ($panRecord->date_of_birth instanceof \DateTimeInterface ? $panRecord->date_of_birth->format('Y-m-d') : $panRecord->date_of_birth)
+                        : ($aadhaarRecord && $aadhaarRecord->date_of_birth
+                            ? ($aadhaarRecord->date_of_birth instanceof \DateTimeInterface ? $aadhaarRecord->date_of_birth->format('Y-m-d') : $aadhaarRecord->date_of_birth)
+                            : null),
+                    
+                    'aadhaar_number' => $maskedAadhaar,
+                    'aadhaar_data' => $aadhaarRecord ? [
+                         'name' => $aadhaarRecord->name,
+                         'dob' => $aadhaarRecord->date_of_birth instanceof \DateTimeInterface ? $aadhaarRecord->date_of_birth->format('Y-m-d') : $aadhaarRecord->date_of_birth,
+                         'address' => $aadhaarRecord->address,
+                         'state' => $aadhaarRecord->state,
+                         'city' => $aadhaarRecord->city,
+                         'pincode' => $aadhaarRecord->pincode,
+                     ] : null,
+                     
+                    'first_name' => $firstName,
+                    'last_name' => $lastName,
+                    'email' => $user ? $user->email : ($aadhaarRecord ? $aadhaarRecord->email : null),
+
                     'timestamp' => now()
+                ],
+                // Backward compatibility alias
+                'kyc_details' => [
+                     'status' => $status,
+                     'pan_number' => $panRecord ? $panRecord->pan_number : null,
+                     'name_as_per_pan' => $panRecord ? $panRecord->name : null,
+                     'date_of_birth' => $panRecord && $panRecord->date_of_birth
+                         ? ($panRecord->date_of_birth instanceof \DateTimeInterface ? $panRecord->date_of_birth->format('Y-m-d') : $panRecord->date_of_birth)
+                         : ($aadhaarRecord && $aadhaarRecord->date_of_birth
+                             ? ($aadhaarRecord->date_of_birth instanceof \DateTimeInterface ? $aadhaarRecord->date_of_birth->format('Y-m-d') : $aadhaarRecord->date_of_birth)
+                             : null),
+                     'aadhaar_number' => $maskedAadhaar,
+                     'first_name' => $firstName,
+                     'last_name' => $lastName,
+                     'email' => $user ? $user->email : ($aadhaarRecord ? $aadhaarRecord->email : null),
+                     'aadhaar_verified' => $aadhaarVerified,
+                     'pan_verified' => $panVerified,
+                     'submitted_at' => $panRecord ? $panRecord->verified_at : ($aadhaarRecord ? $aadhaarRecord->verified_at : null),
+                     'verified_at' => ($panVerified && $aadhaarVerified) ? ($user ? $user->kyc_verified_at : now()) : null,
                 ],
                 'timestamp' => now()
             ], 200);
@@ -645,104 +903,123 @@ class KycController extends Controller
      */
     private function callAadhaarOtpAPI($aadhaarNumber)
     {
-        try {
-            $environment = $this->quickekycConfig['environment'];
-            $apiKey = $environment === 'sandbox' 
-                ? $this->quickekycConfig['sandbox_api_key'] 
-                : $this->quickekycConfig['api_key'];
-            $apiUrl = $environment === 'sandbox'
-                ? $this->quickekycConfig['sandbox_url']
-                : $this->quickekycConfig['api_url'];
-            
-            Log::info("Aadhaar OTP API - Environment: $environment, URL: $apiUrl, API Key: " . substr($apiKey, 0, 8) . "...");
-            
-            // For testing without real API key - Mock response
-            if (!$apiKey || $apiKey === 'your_kyc_api_key_here') {
-                Log::info("Aadhaar OTP API - Using MOCK response for testing");
+        $environment = $this->quickekycConfig['environment'];
+        $apiKey = $environment === 'sandbox' 
+            ? $this->quickekycConfig['sandbox_api_key'] 
+            : $this->quickekycConfig['api_key'];
+        $apiUrl = $environment === 'sandbox'
+            ? $this->quickekycConfig['sandbox_url']
+            : $this->quickekycConfig['api_url'];
+        
+        Log::info("Aadhaar OTP API - Environment: $environment, URL: $apiUrl, API Key: " . substr($apiKey, 0, 8) . "...");
+        Log::info("Aadhaar OTP API Call - Aadhaar: ****" . substr($aadhaarNumber, -4));
+
+        $maxAttempts = 2;
+        $lastError = null;
+
+        for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+            try {
+                $ch = curl_init();
                 
-                sleep(1);
-                
-                return [
-                    'success' => true,
-                    'data' => [
-                        'request_id' => 'MOCK_REQ_' . time() . '_' . rand(1000, 9999)
+                curl_setopt_array($ch, [
+                    CURLOPT_URL => $apiUrl . '/api/v1/aadhaar-v2/generate-otp',
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_ENCODING => '',
+                    CURLOPT_MAXREDIRS => 10,
+                    CURLOPT_TIMEOUT => 30,
+                    CURLOPT_CONNECTTIMEOUT => 10,
+                    CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
+                    CURLOPT_CUSTOMREQUEST => 'POST',
+                    CURLOPT_POSTFIELDS => json_encode([
+                        'key' => $apiKey,
+                        'id_number' => $aadhaarNumber
+                    ]),
+                    CURLOPT_HTTPHEADER => [
+                        'Content-Type: application/json'
                     ],
-                    'raw_response' => [
-                        'status' => 'success',
-                        'message' => 'OTP sent successfully (MOCK MODE - For testing only)',
-                        'mock_mode' => true
-                    ]
-                ];
-            }
-            
-            Log::info("Aadhaar OTP API Call - Aadhaar: ****" . substr($aadhaarNumber, -4));
+                    CURLOPT_SSL_VERIFYPEER => $environment === 'production',
+                    CURLOPT_SSL_VERIFYHOST => $environment === 'production' ? 2 : 0
+                ]);
 
-            $ch = curl_init();
-            
-            curl_setopt_array($ch, [
-                CURLOPT_URL => $apiUrl . '/api/v1/aadhaar-v2/generate-otp',
-                CURLOPT_RETURNTRANSFER => true,
-                CURLOPT_ENCODING => '',
-                CURLOPT_MAXREDIRS => 10,
-                CURLOPT_TIMEOUT => 30,
-                CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
-                CURLOPT_CUSTOMREQUEST => 'POST',
-                CURLOPT_POSTFIELDS => json_encode([
-                    'key' => $apiKey,
-                    'id_number' => $aadhaarNumber
-                ]),
-                CURLOPT_HTTPHEADER => [
-                    'Content-Type: application/json'
-                ],
-                CURLOPT_SSL_VERIFYPEER => ($this->quickekycConfig['environment'] ?? 'sandbox') === 'production',
-                CURLOPT_SSL_VERIFYHOST => ($this->quickekycConfig['environment'] ?? 'sandbox') === 'production' ? 2 : 0
-            ]);
-
-            $response = curl_exec($ch);
-            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            
-            if (curl_errno($ch)) {
-                throw new \Exception('cURL Error: ' . curl_error($ch));
-            }
-            
-            curl_close($ch);
-
-            Log::info("Aadhaar OTP API Response - HTTP: $httpCode");
-            Log::info("Aadhaar OTP API Raw Response: " . substr($response, 0, 500));
-
-            $result = json_decode($response, true);
-
-            if ($httpCode === 200 && isset($result['status']) && $result['status'] === 'success') {
-                // Get request_id from API - it returns as integer or string
-                $apiRequestId = $result['data']['request_id'] ?? $result['request_id'] ?? null;
+                $response = curl_exec($ch);
+                $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
                 
-                // Convert to string if it's numeric to ensure consistent format
-                $requestId = $apiRequestId !== null ? (string)$apiRequestId : 'REQ_' . time() . '_' . rand(1000, 9999);
+                if (curl_errno($ch)) {
+                    $curlError = curl_error($ch);
+                    curl_close($ch);
+                    throw new \Exception('cURL Error: ' . $curlError);
+                }
                 
-                Log::info("Aadhaar OTP Generated Successfully - RequestID: " . $requestId);
+                curl_close($ch);
+
+                Log::info("Aadhaar OTP API Response (attempt {$attempt}) - HTTP: $httpCode");
+                Log::info("Aadhaar OTP API Raw Response: " . substr($response, 0, 500));
+
+                $result = json_decode($response, true);
+
+                // ── Success ──
+                if ($httpCode === 200 && isset($result['status']) && $result['status'] === 'success') {
+                    $apiRequestId = $result['data']['request_id'] ?? $result['request_id'] ?? null;
+                    $requestId = $apiRequestId !== null ? (string)$apiRequestId : 'REQ_' . time() . '_' . rand(1000, 9999);
+                    
+                    Log::info("Aadhaar OTP Generated Successfully - RequestID: " . $requestId);
+                    return [
+                        'success' => true,
+                        'data' => ['request_id' => $requestId],
+                        'raw_response' => $result
+                    ];
+                }
+
+                // ── UIDAI backend error (HTTP 200 but status_code 500) — retry ──
+                $internalStatusCode = $result['status_code'] ?? null;
+                $isUidaiBackendError = $httpCode === 200 
+                    && ($internalStatusCode == 500 || ($result['status'] ?? '') === 'error')
+                    && str_contains(strtolower($result['message'] ?? ''), 'error from backend');
+
+                if ($isUidaiBackendError && $attempt < $maxAttempts) {
+                    Log::warning("UIDAI backend error (attempt {$attempt}/{$maxAttempts}), retrying in 2s...", [
+                        'status_code' => $internalStatusCode,
+                        'message' => $result['message'] ?? '',
+                        'request_id' => $result['request_id'] ?? null,
+                    ]);
+                    sleep(2);
+                    continue;
+                }
+
+                // ── Final failure — return appropriate message ──
+                $errorMessage = $result['message'] ?? 'Failed to generate OTP';
+                if ($isUidaiBackendError) {
+                    $errorMessage = 'UIDAI service is temporarily unavailable. Please try again after a few minutes.';
+                }
+
+                Log::warning("Aadhaar OTP Generation Failed - HTTP: $httpCode, Message: " . ($result['message'] ?? 'no message'));
                 return [
-                    'success' => true,
-                    'data' => [
-                        'request_id' => $requestId
-                    ],
-                    'raw_response' => $result
+                    'success'      => false,
+                    'http_code'    => $httpCode,
+                    'error'        => $errorMessage,
+                    'raw_response' => $result,
                 ];
+
+            } catch (\Exception $e) {
+                $lastError = $e->getMessage();
+                $isDnsOrTimeout = str_contains($lastError, 'Could not resolve')
+                    || str_contains($lastError, 'Resolving timed out')
+                    || str_contains($lastError, 'timed out');
+
+                Log::error("Aadhaar OTP API Error (attempt {$attempt}/{$maxAttempts}): " . $lastError);
+
+                if ($isDnsOrTimeout && $attempt < $maxAttempts) {
+                    sleep(1);
+                    continue;
+                }
             }
-
-            Log::warning("Aadhaar OTP Generation Failed - HTTP: $httpCode, Message: " . ($result['message'] ?? 'no message'));
-            return [
-                'success' => false,
-                'error' => $result['message'] ?? 'Failed to generate OTP'
-            ];
-
-        } catch (\Exception $e) {
-            Log::error("Aadhaar OTP API Error: " . $e->getMessage());
-            
-            return [
-                'success' => false,
-                'error' => $e->getMessage()
-            ];
         }
+
+        return [
+            'success'   => false,
+            'http_code' => null,
+            'error'     => $lastError ?? 'Aadhaar OTP API failed after retries',
+        ];
     }
 
     /**
@@ -750,49 +1027,56 @@ class KycController extends Controller
      */
     private function callAadhaarVerifyAPI($requestId, $otp)
     {
-        try {
-            $apiKey = $this->quickekycConfig['environment'] === 'sandbox' 
-                ? $this->quickekycConfig['sandbox_api_key'] 
-                : $this->quickekycConfig['api_key'];
-            $apiUrl = $this->quickekycConfig['environment'] === 'sandbox'
-                ? $this->quickekycConfig['sandbox_url']
-                : $this->quickekycConfig['api_url'];
-            
-            Log::info("Aadhaar Verify API Call - RequestID: $requestId");
+        $apiKey = $this->quickekycConfig['environment'] === 'sandbox' 
+            ? $this->quickekycConfig['sandbox_api_key'] 
+            : $this->quickekycConfig['api_key'];
+        $apiUrl = $this->quickekycConfig['environment'] === 'sandbox'
+            ? $this->quickekycConfig['sandbox_url']
+            : $this->quickekycConfig['api_url'];
+        
+        Log::info("Aadhaar Verify API Call - RequestID: $requestId");
 
-            $ch = curl_init();
-            
-            curl_setopt_array($ch, [
-                CURLOPT_URL => $apiUrl . '/api/v1/aadhaar-v2/submit-otp',
-                CURLOPT_RETURNTRANSFER => true,
-                CURLOPT_ENCODING => '',
-                CURLOPT_MAXREDIRS => 10,
-                CURLOPT_TIMEOUT => 30,
-                CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
-                CURLOPT_CUSTOMREQUEST => 'POST',
-                CURLOPT_POSTFIELDS => json_encode([
-                    'key' => $apiKey,
-                    'request_id' => $requestId,
-                    'otp' => $otp
-                ]),
-                CURLOPT_HTTPHEADER => [
-                    'Content-Type: application/json'
-                ],
-                CURLOPT_SSL_VERIFYPEER => ($this->quickekycConfig['environment'] ?? 'sandbox') === 'production',
-                CURLOPT_SSL_VERIFYHOST => ($this->quickekycConfig['environment'] ?? 'sandbox') === 'production' ? 2 : 0
-            ]);
+        $maxAttempts = 2;
+        $lastError = null;
 
-            $response = curl_exec($ch);
-            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            
-            if (curl_errno($ch)) {
-                throw new \Exception('cURL Error: ' . curl_error($ch));
-            }
-            
-            curl_close($ch);
+        for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+            try {
+                $ch = curl_init();
+                
+                curl_setopt_array($ch, [
+                    CURLOPT_URL => $apiUrl . '/api/v1/aadhaar-v2/submit-otp',
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_ENCODING => '',
+                    CURLOPT_MAXREDIRS => 10,
+                    CURLOPT_TIMEOUT => 30,
+                    CURLOPT_CONNECTTIMEOUT => 10,
+                    CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
+                    CURLOPT_CUSTOMREQUEST => 'POST',
+                    CURLOPT_POSTFIELDS => json_encode([
+                        'key' => $apiKey,
+                        'request_id' => $requestId,
+                        'otp' => $otp
+                    ]),
+                    CURLOPT_HTTPHEADER => [
+                        'Content-Type: application/json'
+                    ],
+                    CURLOPT_SSL_VERIFYPEER => $this->quickekycConfig['environment'] === 'production',
+                    CURLOPT_SSL_VERIFYHOST => $this->quickekycConfig['environment'] === 'production' ? 2 : 0
+                ]);
 
-            Log::info("Aadhaar Verify API Response - HTTP: $httpCode");
-            Log::info("Aadhaar Verify API Raw Response: " . $response);
+                $response = curl_exec($ch);
+                $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                
+                if (curl_errno($ch)) {
+                    $curlError = curl_error($ch);
+                    curl_close($ch);
+                    throw new \Exception('cURL Error: ' . $curlError);
+                }
+                
+                curl_close($ch);
+
+                Log::info("Aadhaar Verify API Response (attempt {$attempt}) - HTTP: $httpCode");
+                Log::info("Aadhaar Verify API Raw Response: " . $response);
 
             $result = json_decode($response, true);
 
@@ -852,18 +1136,77 @@ class KycController extends Controller
 
             Log::warning("Aadhaar Verify API Failed - Status: " . ($result['status'] ?? 'unknown') . ", Message: " . ($result['message'] ?? 'no message'));
             
-            return [
-                'success' => false,
-                'error' => $result['message'] ?? 'Invalid OTP or verification failed'
-            ];
+                // Check for UIDAI backend error — retry
+                $internalStatusCode = $result['status_code'] ?? null;
+                $isUidaiBackendError = $httpCode === 200 
+                    && ($internalStatusCode == 500 || ($result['status'] ?? '') === 'error')
+                    && str_contains(strtolower($result['message'] ?? ''), 'error from backend');
 
-        } catch (\Exception $e) {
-            Log::error("Aadhaar Verify API Error: " . $e->getMessage());
-            
-            return [
-                'success' => false,
-                'error' => $e->getMessage()
-            ];
+                if ($isUidaiBackendError && $attempt < $maxAttempts) {
+                    Log::warning("UIDAI backend error on verify (attempt {$attempt}/{$maxAttempts}), retrying in 2s...");
+                    sleep(2);
+                    continue;
+                }
+
+                $errorMessage = $result['message'] ?? 'Invalid OTP or verification failed';
+                if ($isUidaiBackendError) {
+                    $errorMessage = 'UIDAI service is temporarily unavailable. Please try again after a few minutes.';
+                }
+
+                return [
+                    'success' => false,
+                    'error' => $errorMessage,
+                ];
+
+            } catch (\Exception $e) {
+                $lastError = $e->getMessage();
+                Log::error("Aadhaar Verify API Error (attempt {$attempt}/{$maxAttempts}): " . $lastError);
+
+                $isDnsOrTimeout = str_contains($lastError, 'Could not resolve')
+                    || str_contains($lastError, 'timed out');
+
+                if ($isDnsOrTimeout && $attempt < $maxAttempts) {
+                    sleep(1);
+                    continue;
+                }
+            }
         }
+
+        return [
+            'success' => false,
+            'error' => $lastError ?? 'Aadhaar verification failed after retries',
+        ];
+    }
+
+    /**
+     * Update User KYC Status based on PAN and Aadhaar
+     */
+    private function _updateUserKycStatus($mobile)
+    {
+        if (empty($mobile)) {
+            return;
+        }
+
+        $user = User::where('mobile', $mobile)->first();
+        if (!$user) {
+            return;
+        }
+
+        $panVerified = PanVerification::where('mobile', $mobile)->where('is_verified', true)->exists();
+        $aadhaarVerified = AadhaarVerification::where('mobile', $mobile)->where('is_verified', true)->exists();
+
+        $status = 'pending';
+        // Only set verified if BOTH are verified
+        if ($panVerified && $aadhaarVerified) {
+            $status = 'verified';
+            $user->kyc_verified_at = now();
+        } elseif ($panVerified || $aadhaarVerified) {
+            $status = 'pending';
+        }
+
+        $user->kyc_status = $status;
+        $user->save();
+        
+        Log::info("Updated user KYC status for mobile {$mobile} to: {$status}");
     }
 }

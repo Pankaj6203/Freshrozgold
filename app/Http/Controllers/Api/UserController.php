@@ -39,12 +39,30 @@ class UserController extends Controller
                 ->where('is_verified', true)
                 ->exists();
 
-            $aadhaarVerified = DB::table('aadhaar_verifications')
+            $aadhaarVerified = false;
+            $aadhaarImage = null;
+
+            $aadhaarRecord = DB::table('aadhaar_verifications')
                 ->where('mobile', $user->mobile)
                 ->where('is_verified', true)
-                ->exists();
+                ->orderBy('updated_at', 'desc')
+                ->first();
+
+            if ($aadhaarRecord) {
+                $aadhaarVerified = true;
+                $aadhaarImage = $aadhaarRecord->profile_image;
+            }
 
             $kycStatus = ($panVerified && $aadhaarVerified) ? 'verified' : (($panVerified || $aadhaarVerified) ? 'partial' : 'pending');
+
+            // Sync calculated status to user table if needed
+            if ($user->kyc_status !== $kycStatus) {
+                $user->kyc_status = $kycStatus;
+                if ($kycStatus === 'verified' && !$user->kyc_verified_at) {
+                    $user->kyc_verified_at = now();
+                }
+                $user->save();
+            }
 
             $userData = [
                 'id' => $user->id,
@@ -53,8 +71,11 @@ class UserController extends Controller
                 'mobile' => $user->mobile,
                 'pan' => $user->pan,
                 'aadhaar' => $maskedAadhaar,
+                'profile_image' => $aadhaarImage, // Added profile image from Aadhaar
                 'kyc_status' => $kycStatus,
                 'kyc_verified_at' => $user->kyc_verified_at,
+                'augmont_user_id' => $user->augmont_user_id,
+                'unique_id' => $user->unique_id,
                 'created_at' => $user->created_at,
             ];
 

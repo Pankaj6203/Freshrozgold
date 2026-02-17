@@ -29,8 +29,17 @@ class GoldController extends Controller
         try {
             Log::info("Fetching gold rates from Augmont API");
 
-            // Cache rates for 60 seconds to reduce Augmont API calls
-            $currentRates = Cache::remember('gold_rates', 60, function () {
+            // Check if force refresh is requested
+            $forceRefresh = $request->query('refresh') === 'true';
+
+            if ($forceRefresh) {
+                // Clear cache and force fresh API call
+                Cache::forget('gold_rates');
+                Log::info("Force refresh requested - clearing cache");
+            }
+
+            // Cache rates for 15 seconds (reduced from 60 for more real-time updates)
+            $currentRates = Cache::remember('gold_rates', 15, function () {
                 $ratesResponse = $this->augmont->getRates();
 
                 if (!$ratesResponse['success']) {
@@ -630,9 +639,21 @@ class GoldController extends Controller
                 'quantity' => $quantity,
             ];
 
-            // Add bank details if provided
+            // Add bank details if provided (resolve userBankId to bank object if needed)
             if ($request->has('userBank')) {
                 $sellData['userBank'] = $request->userBank;
+            } elseif ($request->has('userBankId') && Auth::check()) {
+                $bankRecord = \App\Models\UserBank::where('id', $request->userBankId)
+                    ->where('user_id', Auth::id())
+                    ->first();
+                if ($bankRecord) {
+                    $sellData['userBank'] = [
+                        'accountNumber' => $bankRecord->account_number,
+                        'accountName'   => $bankRecord->account_name,
+                        'ifscCode'      => $bankRecord->ifsc_code,
+                    ];
+                    Log::info('Resolved userBankId to bank details', ['bank_id' => $request->userBankId]);
+                }
             }
 
             Log::info('Attempting Augmont Sell API', ['data' => $sellData]);

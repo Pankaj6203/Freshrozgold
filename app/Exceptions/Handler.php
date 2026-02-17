@@ -10,6 +10,7 @@ use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
 use Symfony\Component\HttpKernel\Exception\MethodNotAllowedHttpException;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\HttpKernel\Exception\TooManyRequestsHttpException;
+use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 use Throwable;
 
 class Handler extends ExceptionHandler
@@ -72,7 +73,7 @@ class Handler extends ExceptionHandler
                 return response()->json(['success' => false, 'message' => 'Access denied'], 403);
             }
 
-            $statusCode = method_exists($e, 'getStatusCode') ? $e->getStatusCode() : 500;
+            $statusCode = $e instanceof HttpExceptionInterface ? $e->getStatusCode() : 500;
 
             return response()->json([
                 'success' => false,

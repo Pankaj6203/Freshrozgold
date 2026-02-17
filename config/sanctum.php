@@ -15,11 +15,8 @@ return [
     |
     */
 
-    'stateful' => explode(',', env('SANCTUM_STATEFUL_DOMAINS', sprintf(
-        '%s%s',
-        'localhost,localhost:3000,127.0.0.1,127.0.0.1:8000,::1',
-        Sanctum::currentApplicationUrlWithPort()
-    ))),
+    'stateful' => [],
+
 
     /*
     |--------------------------------------------------------------------------
@@ -46,7 +43,7 @@ return [
     |
     */
 
-    'expiration' => (int) env('SANCTUM_TOKEN_EXPIRATION', 1440),
+    'expiration' => (int) env('SANCTUM_TOKEN_EXPIRATION', 720),
 
     /*
     |--------------------------------------------------------------------------

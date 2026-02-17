@@ -1,0 +1,407 @@
+{
+	"info": {
+		"_postman_id": "freshrozgold-collection-id",
+		"name": "Freshrozgold API",
+		"description": "API collection for Freshrozgold including Auth, Gold Buy/Sell, Rates, and Augmont integration.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "Auth",
+			"item": [
+				{
+					"name": "Merchant Login",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"email\": \"admin@example.com\",\n    \"password\": \"password\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{base_url}}/auth/merchant-login",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"auth",
+								"merchant-login"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Register User",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"name\": \"Test User\",\n    \"email\": \"test@example.com\",\n    \"mobile\": \"9876543210\",\n    \"password\": \"password\",\n    \"password_confirmation\": \"password\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{base_url}}/auth/register",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"auth",
+								"register"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Rates (Price)",
+			"item": [
+				{
+					"name": "Get Live Rates (Public)",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/rates/live",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"rates",
+								"live"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get Authenticated Rates",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/gold/rates",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"gold",
+								"rates"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Gold Buy",
+			"item": [
+				{
+					"name": "Get Buy Info",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/gold/buy-info",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"gold",
+								"buy-info"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Buy Gold (Amount)",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"metalType\": \"gold\",\n    \"amount\": 100,\n    \"lockPrice\": 7200,\n    \"blockId\": \"BLOCK123\",\n    \"uniqueId\": \"USER_UNIQUE_ID\",\n    \"modeOfPayment\": \"Online\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{base_url}}/gold/buy",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"gold",
+								"buy"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Buy Gold (Quantity)",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"metalType\": \"gold\",\n    \"quantity\": 0.1,\n    \"lockPrice\": 7200,\n    \"blockId\": \"BLOCK123\",\n    \"uniqueId\": \"USER_UNIQUE_ID\",\n    \"modeOfPayment\": \"Online\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{base_url}}/gold/buy",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"gold",
+								"buy"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get Buy List",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/gold/buy-list",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"gold",
+								"buy-list"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Gold Sell",
+			"item": [
+				{
+					"name": "Get Sell Info",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/gold/sell-info",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"gold",
+								"sell-info"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Sell Gold",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"metalType\": \"gold\",\n    \"quantity\": 0.1,\n    \"lockPrice\": 7000,\n    \"blockId\": \"BLOCK123\",\n    \"uniqueId\": \"USER_UNIQUE_ID\",\n    \"merchantTransactionId\": \"TXN_123456\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{base_url}}/gold/sell",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"gold",
+								"sell"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get Sell List",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/gold/sell-list",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"gold",
+								"sell-list"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Augmont",
+			"item": [
+				{
+					"name": "Create Augmont User",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"uniqueId\": \"USER_UNIQUE_ID\",\n    \"mobileNumber\": \"9876543210\",\n    \"emailId\": \"test@example.com\",\n    \"userName\": \"Test User\",\n    \"userCity\": \"Mumbai\",\n    \"userState\": \"Maharashtra\",\n    \"userPincode\": \"400001\",\n    \"userDob\": \"1990-01-01\",\n    \"utmSource\": \"mobile_app\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{base_url}}/augmont/users",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"augmont",
+								"users"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		}
+	],
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost/api",
+			"type": "string"
+		},
+		{
+			"key": "token",
+			"value": "YOUR_AUTH_TOKEN",
+			"type": "string"
+		}
+	]
+}

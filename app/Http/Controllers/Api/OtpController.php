@@ -196,7 +196,7 @@ class OtpController extends Controller
                 'data' => [
                     'token' => $token,
                     'token_type' => 'Bearer',
-                    'user' => $user->only(['id','name','email','mobile','unique_id','kyc_status'])
+                    'user' => $user->only(['id','name','email','mobile','unique_id','kyc_status','augmont_user_id'])
                 ],
                 'timestamp' => now()
             ], 200);

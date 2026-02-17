@@ -100,38 +100,91 @@ class BankController extends Controller
     }
 
     /**
-     * Validate IFSC code against master list
+     * Validate IFSC code using Razorpay's free IFSC API
      * GET /api/banks/validate-ifsc/{ifsc}
+     * GET /api/augmont/banks/validate-ifsc/{ifsc}
      */
     public function validateIfsc(string $ifsc)
     {
+        // Enforce uppercase expectation and IFSC format (4 letters + 0 + 6 alnum)
+        $ifsc = strtoupper(trim($ifsc));
+        
         if (!preg_match('/^[A-Z]{4}0[A-Z0-9]{6}$/', $ifsc)) {
-            return response()->json(['success' => false, 'message' => 'Invalid IFSC format'], 400);
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid IFSC format. IFSC should be 11 characters (e.g., SBIN0001234)',
+                'errors'  => null
+            ], 400);
         }
 
-        $banks = $this->augmont->getBanks();
+        try {
+            // Use Razorpay's free IFSC API - no authentication required
+            $response = \Illuminate\Support\Facades\Http::timeout(10)
+                ->get("https://ifsc.razorpay.com/{$ifsc}");
 
-        if (!$banks['success']) {
-            return response()->json(['success' => false, 'message' => 'Unable to validate IFSC at this time'], 503);
+            if ($response->successful()) {
+                $data = $response->json();
+                
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Valid IFSC code',
+                    'data'    => [
+                        'bank_name'   => $data['BANK'] ?? null,
+                        'bank_code'   => $data['BANKCODE'] ?? null,
+                        'ifsc_prefix' => substr($ifsc, 0, 4),
+                        'branch'      => $data['BRANCH'] ?? null,
+                        'address'     => $data['ADDRESS'] ?? null,
+                        'city'        => $data['CITY'] ?? null,
+                        'state'       => $data['STATE'] ?? null,
+                        'contact'     => $data['CONTACT'] ?? null,
+                    ]
+                ], 200);
+            }
+
+            if ($response->status() === 404) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'IFSC code not found. Please check the code and try again.',
+                    'errors'  => null
+                ], 404);
+            }
+
+            // Other error
+            \Illuminate\Support\Facades\Log::warning('IFSC validation failed', [
+                'ifsc' => $ifsc,
+                'status' => $response->status(),
+                'body' => $response->body()
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Unable to validate IFSC at this time. Please try again.',
+                'errors'  => null
+            ], 503);
+
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('IFSC validation error', [
+                'ifsc' => $ifsc,
+                'error' => $e->getMessage()
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'IFSC validation service temporarily unavailable',
+                'errors'  => null
+            ], 503);
         }
-
-        $bankList = $banks['data'] ?? [];
-        $matched  = collect($bankList)->first(fn ($b) => str_starts_with($ifsc, $b['ifscPrefix'] ?? ''));
-
-        return response()->json([
-            'success' => (bool) $matched,
-            'message' => $matched ? 'Valid IFSC code' : 'IFSC code not found in supported banks',
-            'data'    => $matched ? ['bank' => $matched] : null,
-        ]);
     }
 
     // =============================================
-    // LOCAL BANK CRUD (without Augmont)
+    // LOCAL BANK CRUD (with Augmont auto-registration)
     // =============================================
 
     /**
-     * Add bank account (local DB only, no Augmont)
+     * Add bank account (Local DB + Augmont registration)
      * POST /api/banks/add
+     * 
+     * Automatically registers bank with Augmont so user can sell gold seamlessly
      */
     public function addLocal(Request $request)
     {
@@ -140,6 +193,7 @@ class BankController extends Controller
             'account_name'   => 'required|string|min:2|max:100',
             'ifsc_code'      => 'required|string|size:11|regex:/^[A-Z]{4}0[A-Z0-9]{6}$/',
             'bank_name'      => 'required|string|min:2|max:100',
+            'bank_id'        => 'nullable|string', // Augmont bank ID from master list
         ]);
 
         if ($validator->fails()) {
@@ -157,19 +211,75 @@ class BankController extends Controller
             return response()->json(['success' => false, 'message' => 'Bank account with this account number already exists'], 400);
         }
 
+        // Save to local DB first
         $bank = UserBank::create([
             'user_id'        => $user->id,
             'account_number' => $request->account_number,
             'account_name'   => $request->account_name,
             'ifsc_code'      => $request->ifsc_code,
             'bank_name'      => $request->bank_name,
+            'bank_id'        => $request->bank_id,
             'status'         => 'active',
         ]);
 
+        $augmontRegistered = false;
+        $augmontBankId = null;
+        $augmontError = null;
+
+        // Auto-register with Augmont if user has augmont_user_id
+        if ($user->augmont_user_id) {
+            try {
+                $augmontResponse = $this->augmont->createUserBank($user->augmont_user_id, [
+                    'accountNumber' => $request->account_number,
+                    'accountName'   => $request->account_name,
+                    'ifscCode'      => $request->ifsc_code,
+                    'bankId'        => $request->bank_id,
+                ]);
+
+                if ($augmontResponse['success']) {
+                    $augmontRegistered = true;
+                    // Extract Augmont bank ID from response and save
+                    $augmontBankId = $augmontResponse['data']['userBankId'] ?? $augmontResponse['data']['bankId'] ?? null;
+                    
+                    if ($augmontBankId) {
+                        $bank->update(['bank_id' => $augmontBankId]);
+                    }
+                    
+                    Log::info('Bank registered with Augmont', [
+                        'user_id' => $user->id,
+                        'bank_id' => $bank->id,
+                        'augmont_bank_id' => $augmontBankId
+                    ]);
+                } else {
+                    $augmontError = $augmontResponse['message'] ?? 'Augmont registration failed';
+                    Log::warning('Augmont bank registration failed', [
+                        'user_id' => $user->id,
+                        'bank_id' => $bank->id,
+                        'error' => $augmontError
+                    ]);
+                }
+            } catch (\Exception $e) {
+                $augmontError = $e->getMessage();
+                Log::error('Augmont bank registration error', [
+                    'user_id' => $user->id,
+                    'bank_id' => $bank->id,
+                    'error' => $e->getMessage()
+                ]);
+            }
+        } else {
+            $augmontError = 'User not registered with Augmont yet';
+        }
+
         return response()->json([
             'success' => true,
-            'message' => 'Bank account added successfully',
-            'data'    => ['bank_account' => $bank],
+            'message' => $augmontRegistered 
+                ? 'Bank account added and registered with Augmont successfully' 
+                : 'Bank account added locally (Augmont registration pending)',
+            'data'    => [
+                'bank_account' => $bank->fresh(),
+                'augmont_registered' => $augmontRegistered,
+                'augmont_error' => $augmontError,
+            ],
         ]);
     }
 

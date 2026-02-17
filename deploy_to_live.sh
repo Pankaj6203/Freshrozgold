@@ -19,6 +19,12 @@ mkdir -p "$DEPLOY_DIR/app/Http/Controllers/Api"
 cp "app/Http/Controllers/Api/PaymentController.php" "$DEPLOY_DIR/app/Http/Controllers/Api/"
 cp "app/Http/Controllers/Api/KycController.php" "$DEPLOY_DIR/app/Http/Controllers/Api/"
 cp "app/Http/Controllers/Api/OtpController.php" "$DEPLOY_DIR/app/Http/Controllers/Api/"
+cp "app/Http/Controllers/Api/GoldController.php" "$DEPLOY_DIR/app/Http/Controllers/Api/"
+cp "app/Http/Controllers/Api/UserController.php" "$DEPLOY_DIR/app/Http/Controllers/Api/"
+
+echo "Copying request files..."
+mkdir -p "$DEPLOY_DIR/app/Http/Requests"
+cp "app/Http/Requests/SellGoldRequest.php" "$DEPLOY_DIR/app/Http/Requests/"
 
 echo "Copying config files..."
 mkdir -p "$DEPLOY_DIR/config"

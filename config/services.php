@@ -63,9 +63,9 @@ return [
     ],
 
     'quickekyc' => [
-        'environment' => env('QUICKEKYC_ENVIRONMENT', 'sandbox'),
-        'api_url' => env('QUICKEKYC_API_URL', 'https://api.quickekyc.com'),
-        'sandbox_url' => env('QUICKEKYC_SANDBOX_URL', 'https://sandbox.quickekyc.com'),
+        'environment' => env('QUICKEKYC_ENVIRONMENT', ''), // 'production' or 'sandbox'
+        'api_url' => env('QUICKEKYC_API_URL',''),
+        'sandbox_url' => env('QUICKEKYC_SANDBOX_URL', ''),
         'api_key' => env('QUICKEKYC_API_KEY', ''),
         'sandbox_api_key' => env('QUICKEKYC_SANDBOX_API_KEY', ''),
         'webhook_secret' => env('QUICKEKYC_WEBHOOK_SECRET', ''),

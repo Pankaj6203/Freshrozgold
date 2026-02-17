@@ -19,7 +19,7 @@ return [
 
     'allowed_methods' => ['*'],
 
-    'allowed_origins' => explode(',', env('CORS_ALLOWED_ORIGINS', 'http://localhost,http://localhost:3000,http://localhost:5173,http://127.0.0.1,https://rozgold.techotd.in,https://rozgold.in')),
+    'allowed_origins' => ['*'],
 
     'allowed_origins_patterns' => [],
 

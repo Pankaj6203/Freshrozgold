@@ -158,6 +158,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/', [BankController::class, 'listLocal']);
         Route::post('/add', [BankController::class, 'addLocal']);
         Route::post('/verify', [BankController::class, 'verifyBankAccount']);
+        Route::get('/validate-ifsc/{ifsc}', [BankController::class, 'validateIfsc']); // IFSC validation
         Route::put('/{id}', [BankController::class, 'updateLocal']);
         Route::delete('/{id}', [BankController::class, 'deleteLocal']);
     });

@@ -211,19 +211,66 @@ class WebhookController extends Controller
             return response()->json(['success' => false, 'message' => 'Invalid signature'], 403);
         }
 
+
         $orderId = $request->input('data.order.order_id');
         $status  = $request->input('data.order.order_status');
 
         if ($orderId && $status) {
-            // Update payment order status
+            // 1. Try finding a PaymentOrder (Gold/Product purchase)
             $paymentOrder = \App\Models\PaymentOrder::where('order_id', $orderId)->first();
             if ($paymentOrder) {
                 $paymentOrder->update(['order_status' => $status]);
                 Log::info("Payment order {$orderId} updated to {$status}");
+                return response()->json(['success' => true, 'message' => 'Payment webhook processed (Order)']);
+            }
+
+            // 2. Try finding a WalletTransaction (Add Money)
+            // Wallet transactions use 'reference_id' to store the Cashfree order ID
+            $walletTxn = \App\Models\WalletTransaction::where('reference_id', $orderId)->first();
+            
+            if ($walletTxn && $walletTxn->category === 'add_money') {
+                if ($walletTxn->status !== 'completed') {
+                    if ($status === 'PAID') {
+                        // Credit the wallet
+                        try {
+                            \Illuminate\Support\Facades\DB::transaction(function () use ($walletTxn, $status, $request) {
+                                $wallet = \App\Models\Wallet::find($walletTxn->wallet_id);
+                                if ($wallet) {
+                                    $balanceBefore = $wallet->balance;
+                                    $wallet->credit($walletTxn->amount);
+                                    
+                                    $walletTxn->update([
+                                        'status' => 'completed',
+                                        'balance_before' => $balanceBefore,
+                                        'balance_after' => $wallet->balance,
+                                        'payment_method' => 'cashfree', // or extract from payload
+                                        'meta' => array_merge($walletTxn->meta ?? [], [
+                                            'webhook_data' => $request->all()
+                                        ])
+                                    ]);
+                                }
+                            });
+                            Log::info("Wallet transaction {$orderId} completed via webhook");
+                        } catch (\Exception $e) {
+                            Log::error("Failed to credit wallet via webhook: " . $e->getMessage());
+                        }
+                    } else if ($status === 'FAILED' || $status === 'USER_DROPPED') {
+                        $walletTxn->update([
+                            'status' => 'failed',
+                            'meta' => array_merge($walletTxn->meta ?? [], [
+                                'webhook_data' => $request->all()
+                            ])
+                        ]);
+                        Log::info("Wallet transaction {$orderId} marked failed via webhook");
+                    }
+                } else {
+                    Log::info("Wallet transaction {$orderId} already completed, ignoring webhook");
+                }
+                return response()->json(['success' => true, 'message' => 'Payment webhook processed (Wallet)']);
             }
         }
 
-        return response()->json(['success' => true, 'message' => 'Payment webhook processed']);
+        return response()->json(['success' => true, 'message' => 'Payment webhook processed (No action taken)']);
     }
 
     /**

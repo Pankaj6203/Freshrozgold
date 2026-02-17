@@ -13,12 +13,70 @@ class AugmontService
     private string $password;
     private ?string $authToken = null;
 
+    // DNS resolution cache (in-memory for this request lifecycle)
+    private static ?string $resolvedIp = null;
+
     public function __construct()
     {
         $config = config('services.augmont');
         $this->apiUrl  = $config['api_url'];
         $this->email   = $config['email'];
         $this->password = $config['password'];
+    }
+
+    // ─── DNS Helper ─────────────────────────────────────────────
+
+    /**
+     * Resolve Augmont hostname to IP and cache it.
+     * Shared hosting DNS resolvers are often slow/unreliable.
+     * We cache the resolved IP for 30 minutes so cURL can skip DNS lookup.
+     */
+    private function getResolvedHost(): ?string
+    {
+        $host = parse_url($this->apiUrl, PHP_URL_HOST);
+        if (!$host) return null;
+
+        // Check Laravel cache first (survives across requests)
+        $cacheKey = 'dns_resolve_' . $host;
+        $cachedIp = Cache::get($cacheKey);
+        if ($cachedIp) {
+            return "{$host}:443:{$cachedIp}";
+        }
+
+        // Try to resolve via gethostbyname
+        $ip = @gethostbyname($host);
+        if ($ip && $ip !== $host) {
+            Cache::put($cacheKey, $ip, now()->addMinutes(30));
+            Log::info("DNS resolved: {$host} → {$ip} (cached 30 min)");
+            return "{$host}:443:{$ip}";
+        }
+
+        // Fallback: try Google DNS via dns_get_record
+        $records = @dns_get_record($host, DNS_A);
+        if (!empty($records[0]['ip'])) {
+            $ip = $records[0]['ip'];
+            Cache::put($cacheKey, $ip, now()->addMinutes(30));
+            Log::info("DNS resolved (dns_get_record): {$host} → {$ip} (cached 30 min)");
+            return "{$host}:443:{$ip}";
+        }
+
+        Log::warning("DNS resolution failed for {$host}");
+        return null;
+    }
+
+    /**
+     * Build cURL options for DNS resolution workaround.
+     */
+    private function getCurlOptions(): array
+    {
+        $resolve = $this->getResolvedHost();
+        $options = ['verify' => false];
+        if ($resolve) {
+            $options['curl'] = [
+                CURLOPT_RESOLVE => [$resolve],
+            ];
+        }
+        return $options;
     }
 
     // ─── Authentication ─────────────────────────────────────────
@@ -30,42 +88,67 @@ class AugmontService
             return true;
         }
 
-        try {
-            $response = Http::timeout(30)
-                ->withOptions(['verify' => false])
-                ->post("{$this->apiUrl}/auth/login", [
-                    'email'    => $this->email,
-                    'password' => $this->password,
+        // Retry login up to 2 times on DNS/timeout failure
+        for ($attempt = 1; $attempt <= 2; $attempt++) {
+            try {
+                $loginUrl = "{$this->apiUrl}/auth/login";
+                Log::info("Augmont login attempt {$attempt}", ['url' => $loginUrl]);
+
+                $response = Http::timeout(20)
+                    ->connectTimeout(10)
+                    ->withOptions($this->getCurlOptions())
+                    ->post($loginUrl, [
+                        'email'    => $this->email,
+                        'password' => $this->password,
+                    ]);
+
+                if (!$response->successful()) {
+                    Log::error('Augmont login failed', ['status' => $response->status(), 'body' => $response->body()]);
+                    return false;
+                }
+
+                $data = $response->json();
+                $token     = $data['result']['data']['accessToken']
+                          ?? $data['data']['accessToken']
+                          ?? $data['accessToken']
+                          ?? null;
+                $expiresIn = $data['result']['data']['expiresIn']
+                          ?? $data['data']['expiresIn']
+                          ?? $data['expiresIn']
+                          ?? 7200;
+
+                if (!$token) {
+                    Log::error('Token not found in Augmont login response', ['response' => $data]);
+                    return false;
+                }
+
+                $this->authToken = $token;
+                Cache::put('augmont_auth_token', $token, now()->addSeconds((int) $expiresIn - 60));
+                return true;
+
+            } catch (\Exception $e) {
+                $errorMsg = $e->getMessage();
+                $isDnsOrTimeout = str_contains($errorMsg, 'Could not resolve')
+                    || str_contains($errorMsg, 'Resolving timed out')
+                    || str_contains($errorMsg, 'cURL error 28')
+                    || str_contains($errorMsg, 'cURL error 6');
+
+                Log::error("Augmont login exception (attempt {$attempt}/2)", [
+                    'error' => $errorMsg,
+                    'is_dns_timeout' => $isDnsOrTimeout,
                 ]);
 
-            if (!$response->successful()) {
-                Log::error('Augmont login failed', ['status' => $response->status(), 'body' => $response->body()]);
+                if ($isDnsOrTimeout && $attempt < 2) {
+                    // Clear DNS cache and retry after a short delay
+                    $host = parse_url($this->apiUrl, PHP_URL_HOST);
+                    Cache::forget('dns_resolve_' . $host);
+                    usleep(500000); // 500ms delay before retry
+                    continue;
+                }
                 return false;
             }
-
-            $data = $response->json();
-            $token     = $data['result']['data']['accessToken']
-                      ?? $data['data']['accessToken']
-                      ?? $data['accessToken']
-                      ?? null;
-            $expiresIn = $data['result']['data']['expiresIn']
-                      ?? $data['data']['expiresIn']
-                      ?? $data['expiresIn']
-                      ?? 7200;
-
-            if (!$token) {
-                Log::error('Token not found in Augmont login response', ['response' => $data]);
-                return false;
-            }
-
-            $this->authToken = $token;
-            Cache::put('augmont_auth_token', $token, now()->addSeconds((int) $expiresIn - 60));
-            return true;
-
-        } catch (\Exception $e) {
-            Log::error('Augmont login exception', ['error' => $e->getMessage()]);
-            return false;
         }
+        return false;
     }
 
     // ─── Generic API Caller ─────────────────────────────────────
@@ -76,57 +159,86 @@ class AugmontService
             return ['success' => false, 'message' => 'Augmont authentication failed', 'status_code' => 401];
         }
 
-        $url = "{$this->apiUrl}/{$endpoint}";
+        // Retry on DNS/timeout (up to 2 attempts)
+        for ($attempt = 1; $attempt <= 2; $attempt++) {
+            $url = "{$this->apiUrl}/{$endpoint}";
 
-        try {
-            $headers = [
-                'Accept'        => 'application/json',
-                'Authorization' => 'Bearer ' . $this->authToken,
-            ];
-            if ($bodyType !== 'formdata') {
-                $headers['Content-Type'] = 'application/json';
-            }
-
-            $http = Http::withHeaders($headers)
-                ->timeout(30)
-                ->withOptions(['verify' => false]);
-
-            $response = match (strtoupper($method)) {
-                'POST'   => $bodyType === 'formdata'
-                            ? $http->asMultipart()->post($url, $data)
-                            : $http->post($url, $data),
-                'PUT'    => $http->put($url, $data),
-                'DELETE' => $http->delete($url, $data),
-                default  => $http->get($url, $data),
-            };
-
-            if ($response->status() === 401) {
-                // Token expired → re-login once
-                $this->authToken = null;
-                Cache::forget('augmont_auth_token');
-                if ($this->login()) {
-                    return $this->call($endpoint, $method, $data, $bodyType);
+            try {
+                $headers = [
+                    'Accept'        => 'application/json',
+                    'Authorization' => 'Bearer ' . $this->authToken,
+                ];
+                if ($bodyType !== 'formdata') {
+                    $headers['Content-Type'] = 'application/json';
                 }
-                return ['success' => false, 'message' => 'Augmont re-authentication failed', 'status_code' => 401];
+
+                $http = Http::withHeaders($headers)
+                    ->timeout(20)
+                    ->connectTimeout(10)
+                    ->withOptions($this->getCurlOptions());
+
+                $response = match (strtoupper($method)) {
+                    'POST'   => $bodyType === 'formdata'
+                                ? $http->asMultipart()->post($url, $data)
+                                : $http->post($url, $data),
+                    'PUT'    => $http->put($url, $data),
+                    'DELETE' => $http->delete($url, $data),
+                    default  => $http->get($url, $data),
+                };
+
+                if ($response->status() === 401) {
+                    // Token expired → re-login once
+                    $this->authToken = null;
+                    Cache::forget('augmont_auth_token');
+                    if ($this->login()) {
+                        return $this->call($endpoint, $method, $data, $bodyType);
+                    }
+                    return ['success' => false, 'message' => 'Augmont re-authentication failed', 'status_code' => 401];
+                }
+
+                $body = $response->json();
+
+                if ($response->successful()) {
+                    return ['success' => true, 'data' => $body];
+                }
+
+                return [
+                    'success'     => false,
+                    'message'     => $body['message'] ?? 'Augmont API error: ' . $response->status(),
+                    'data'        => $body,
+                    'status_code' => $response->status(),
+                ];
+
+            } catch (\Exception $e) {
+                $errorMsg = $e->getMessage();
+                $isDnsOrTimeout = str_contains($errorMsg, 'Could not resolve')
+                    || str_contains($errorMsg, 'Resolving timed out')
+                    || str_contains($errorMsg, 'cURL error 28')
+                    || str_contains($errorMsg, 'cURL error 6');
+
+                Log::error("Augmont API exception (attempt {$attempt}/2)", [
+                    'endpoint' => $endpoint,
+                    'error' => $errorMsg,
+                    'is_dns_timeout' => $isDnsOrTimeout,
+                ]);
+
+                if ($isDnsOrTimeout && $attempt < 2) {
+                    $host = parse_url($this->apiUrl, PHP_URL_HOST);
+                    Cache::forget('dns_resolve_' . $host);
+                    usleep(500000); // 500ms before retry
+                    continue;
+                }
+
+                if (str_contains($errorMsg, 'Could not resolve') || str_contains($errorMsg, 'cURL error 6')) {
+                    return ['success' => false, 'message' => 'Cannot reach Augmont server (DNS resolution failed). Check server network/DNS settings.', 'status_code' => 503];
+                }
+                if (str_contains($errorMsg, 'timed out') || str_contains($errorMsg, 'cURL error 28')) {
+                    return ['success' => false, 'message' => 'Augmont server connection timed out. Please try again.', 'status_code' => 504];
+                }
+                return ['success' => false, 'message' => 'API connection failed: ' . $errorMsg, 'status_code' => 503];
             }
-
-            $body = $response->json();
-
-            if ($response->successful()) {
-                return ['success' => true, 'data' => $body];
-            }
-
-            return [
-                'success'     => false,
-                'message'     => $body['message'] ?? 'Augmont API error: ' . $response->status(),
-                'data'        => $body,
-                'status_code' => $response->status(),
-            ];
-
-        } catch (\Exception $e) {
-            Log::error('Augmont API exception', ['endpoint' => $endpoint, 'error' => $e->getMessage()]);
-            return ['success' => false, 'message' => 'API connection failed: ' . $e->getMessage()];
         }
+        return ['success' => false, 'message' => 'Augmont API failed after retries', 'status_code' => 503];
     }
 
     // ─── Rates ──────────────────────────────────────────────────

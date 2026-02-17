@@ -8,6 +8,7 @@ use App\Http\Requests\CreateAugmontUserRequest;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Validator;
 
 class AugmontUserController extends Controller
 {
@@ -19,17 +20,49 @@ class AugmontUserController extends Controller
      */
     public function store(CreateAugmontUserRequest $request)
     {
-        $response = $this->augmont->createUser($request->validated());
+        $validatedData = $request->validated();
+        
+        Log::info('Augmont user creation attempt', [
+            'uniqueId' => $validatedData['uniqueId'] ?? 'N/A',
+            'userName' => $validatedData['userName'] ?? 'N/A',
+            'mobileNumber' => $validatedData['mobileNumber'] ?? 'N/A',
+        ]);
+
+        $response = $this->augmont->createUser($validatedData);
 
         if (!$response['success']) {
-            return response()->json(['success' => false, 'message' => $response['message'] ?? 'Failed to create user'], 503);
+            $message = $response['message'] ?? 'Failed to create user';
+            $statusCode = $response['status_code'] ?? 503;
+            
+            // Log detailed error for debugging
+            Log::error('Augmont user creation failed', [
+                'message' => $message,
+                'status_code' => $statusCode,
+                'augmont_response' => $response['data'] ?? null,
+                'sent_data' => $validatedData,
+            ]);
+
+            // Surface Augmont validation errors clearly
+            $responseData = ['success' => false, 'message' => $message];
+            if (isset($response['data']['errors'])) {
+                $responseData['errors'] = $response['data']['errors'];
+            }
+            if (isset($response['data']['result']['errors'])) {
+                $responseData['errors'] = $response['data']['result']['errors'];
+            }
+
+            // Use appropriate HTTP status: 422 for validation, 503 for connection issues
+            $httpStatus = ($statusCode >= 400 && $statusCode < 500) ? 422 : 503;
+            return response()->json($responseData, $httpStatus);
         }
 
-        // Link authenticated user to Augmont account
+        // Link authenticated user to Augmont account and update local profile
         if (Auth::check()) {
             $user = Auth::user();
             $user->update([
-                'augmont_user_id' => $request->uniqueId
+                'augmont_user_id' => $request->uniqueId,
+                'name' => $validatedData['userName'] ?? $user->name,
+                'email' => $validatedData['emailId'] ?? $user->email,
             ]);
             Log::info('Augmont user linked to local user', [
                 'local_user_id' => $user->id,
